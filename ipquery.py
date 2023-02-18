@@ -2,11 +2,14 @@ import sys
 import requests
 import socket
 import subprocess
-from itertools import filterfalse
 from shutil import which
 
 # configuration
 URL = "http://localhost:8080/tomcat/server/ip/query"
+BUFFER_LIMIT = 1024
+
+stdout_fileno = sys.stdout
+stderr_fileno = sys.stderr
 
 
 def is_valid_ip(ip):
@@ -25,11 +28,11 @@ def do_reload():
     parameters = "daemon-reload"
 
     try:
-        print(reload_command + " " + parameters)
+        stdout_fileno.write(reload_command + " " + parameters + "\n")
         subprocess.run([reload_command, parameters])
         return True
     except:
-        print(reload_command + "failed")
+        stderr_fileno.write(reload_command + "failed\n")
     return False;
 
 
@@ -42,7 +45,7 @@ def ip_list_to_prefix_set(ip_list, description):
 
     ip_set = set(results)
     for ip in ip_set:
-        print(description + " " + ip)
+        stdout_fileno.write(description + " " + ip + "\n")
 
     return ip_set
 
@@ -58,11 +61,11 @@ def build_command(*arg):
     return command
 
 
-def get_sub1():
+def get_ufw():
     return ufw_command + " status numbered "
 
 
-def get_sub2():
+def get_grep():
     sub2_regexp = "[0-9][0-9]\\{0,2\\}"
     sub2_octal = sub2_regexp + "\\."
     sub2 = "grep '^\\[\\s*[0-9]*] 3389\\s*ALLOW IN\\s*"
@@ -72,48 +75,56 @@ def get_sub2():
     return sub2
 
 
-def get_sub7():
+def get_tr():
     return "tr '\\n' ' ' "
 
 
-def get_filtered_deletions(ip_filter_set):
-    sub3 = ""
+def build_deletions(ip_filter_set):
+    grep_v = ""
     for ip_filter in ip_filter_set:
-        if len(sub3) > 0:
-            sub3 = sub3 + " |"
-        sub3 = sub3 + "grep -v '" + ip_filter + "'"
-    sub4 = "awk '{ print $2 }' "
-    sub5 = "cut -d']' -f 1 "
-    sub6 = "sort -rn "
+        if len(grep_v) > 0:
+            grep_v = grep_v + " |"
+        grep_v = grep_v + "grep -v '" + ip_filter + "'"
+    awk = "awk '{ print $2 }' "
+    cut = "cut -d']' -f 1 "
+    sort = "sort -rn "
 
+    ufw_numbers_command = ""
     try:
-        stdout = subprocess.getoutput(build_command(get_sub1(), get_sub2(), sub3, sub4, sub5, sub6, get_sub7()))
-        return stdout.split()
+        ufw_numbers_command = build_command(get_ufw(), get_grep(), grep_v, awk, cut, sort, get_tr())
+        stdout_fileno.write(ufw_numbers_command + "\n")
+        buffer = subprocess.getoutput(ufw_numbers_command)
+        if len(buffer) > BUFFER_LIMIT:
+            stderr_fileno.write("BUFFER_LIMIT breached for " + ufw_numbers_command + "\n")
+        return buffer.split()
     except:
-        print("failed")
+        stderr_fileno.write("failed " + ufw_numbers_command + "\n")
 
     return []
 
 
-def get_filtered_additions(ip_candidate_set):
+def build_additions(ip_candidate_set):
     ip_candidate_list = list(ip_candidate_set)
     localhost = "127.0.0"
     if localhost in ip_candidate_list:
         ip_candidate_list.remove(localhost)
 
-    sub3 = "awk '{ print $6 }' "
-    sub4 = "cut -d'/' -f 1"
-    sub5 = "sort"
-    sub6 = "uniq"
-    sub8 = "grep -v '127.0.0.1'"
+    awk = "awk '{ print $6 }' "
+    cut = "cut -d'/' -f 1"
+    sort = "sort"
+    uniq = "uniq"
+    grep_v = "grep -v '127.0.0.1'"
 
+    ufw_ip_list_command = ""
     try:
-        command = build_command(get_sub1(), get_sub2(), sub3, sub4, sub5, sub6, sub8, get_sub7())
-        #print(command)
-        stdout = subprocess.getoutput(command)
+        ufw_ip_list_command = build_command(get_ufw(), get_grep(), awk, cut, sort, uniq, grep_v, get_tr())
+        stdout_fileno.write(ufw_ip_list_command + "\n")
+        buffer = subprocess.getoutput(ufw_ip_list_command)
+        if len(buffer) > BUFFER_LIMIT:
+            stderr_fileno.write("BUFFER_LIMIT breached for " + ufw_ip_list_command + "\n")
         ip_filters = []
 
-        for ip_filter in stdout.split():
+        for ip_filter in buffer.split():
             if is_valid_ip(ip_filter):
                 ip_filters.append(ip_filter)
 
@@ -129,95 +140,110 @@ def get_filtered_additions(ip_candidate_set):
 
         return results
     except:
-        print("failed")
+        stderr_fileno.write("failed " + ufw_ip_list_command + "\n")
 
     return []
 
 
 def do_httpget():
-    print("http get '" + URL + "'")
+    stdout_fileno.write("http get '" + URL + "'\n")
 
     try:
         r = requests.get(url=URL)
     except:
-        print("exception do_httpget '" + URL + "' - ")
+        stderr_fileno.write("exception do_httpget '" + URL + "'\n")
         return None
 
     if r.status_code != 200:
-        print("status code " + str(r.status_code) + " do_httpget '" + URL + "' - ")
-        return []
+        stderr_fileno.write("status code " + str(r.status_code) + " do_httpget '" + URL + "'\n")
+        return None
 
     ip_list = r.text.split(",")
 
     for ip in ip_list[:]:
         if is_valid_ip(ip):
-            print("get " + ip)
+            stdout_fileno.write("get " + ip + "\n")
         else:
-            print("ignoring " + ip)
+            stdout_fileno.write("ignoring " + ip + "\n")
             ip_list.remove(ip)
 
     return ip_list
 
 
 def do_delete(delete_list):
+    result = True
     for ip in delete_list:
         parameters = "delete " + ip
         delete_command = "yes | " + ufw_command + " " + parameters
-        print(delete_command)
+        stdout_fileno.write(delete_command + "\n")
         try:
-            stdout = subprocess.getoutput(delete_command)
+            buffer = subprocess.getoutput(delete_command)
+            if len(buffer) > BUFFER_LIMIT:
+                stderr_fileno.write("BUFFER_LIMIT breached for " + delete_command + "\n")
         except:
-            print("failed")
+            stderr_fileno.write("failed " + delete_command + "\n")
+            result = False
+    return result
 
 
 def do_add(add_list):
+    result = True
     for ip in add_list:
         parameters = "allow from " + ip + "/24 to any port 3389"
-        insert_command = "yes | " + ufw_command + " " + parameters
-        print(insert_command)
+        add_command = "yes | " + ufw_command + " " + parameters
+        stdout_fileno.write(add_command + "\n")
         try:
-            stdout = subprocess.getoutput(insert_command)
+            buffer = subprocess.getoutput(add_command)
+            if len(buffer) > BUFFER_LIMIT:
+                stderr_fileno.write("BUFFER_LIMIT breached for " + add_command + "\n")
         except:
-            print("failed")
+            stderr_fileno.write("failed " + add_command + "\n")
+            result = False
+    return result
 
 
 # checks
-print("start.")
+stdout_fileno.write("start.\n")
 
 ufw_command = "ufw";
 if not is_on_path(ufw_command):
-    print("command ufw not in path")
+    stderr_fileno.write("command ufw not in path\n")
     exit (1)
 
 reload_command = "systemctl";
 if not is_on_path(reload_command):
-    print("command systemctl not in path")
+    stderr_fileno.write("command systemctl not in path\n")
     exit (1)
-
 
 ip_get_list = do_httpget()
 
 if ip_get_list is None:
-    print("http failed")
+    stderr_fileno.write("http failed\n")
     exit(1)
 
 if len(ip_get_list) == 0:
-    print("nothing to do")
+    stdout_fileno.write("nothing to do\n")
     exit(0)
 
 ip_prefix_get_set = ip_list_to_prefix_set(ip_get_list, "get set")
 
-ip_deletions = get_filtered_deletions(ip_prefix_get_set)
+ip_deletions = build_deletions(ip_prefix_get_set)
 
-ip_additions = get_filtered_additions(ip_prefix_get_set)
+ip_additions = build_additions(ip_prefix_get_set)
 
-do_add(ip_additions)
+exit_code = 0
 
-do_delete(ip_deletions)
+if not do_add(ip_additions):
+    stderr_fileno.write("do add had errors\n")
+    exit_code += 1
+
+if not do_delete(ip_deletions):
+    stderr_fileno.write("do delete had errors\n")
+    exit_code += 2
 
 if not do_reload():
-    print("do reload failed")
-    exit(1)
+    stderr_fileno.write("do reload failed\n")
+    exit_code += 4
 
-print("fini.")
-exit(0)
+stdout_fileno.write("fini.\n")
+exit(exit_code)
